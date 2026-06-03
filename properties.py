@@ -1,74 +1,194 @@
 import bpy
 import os
 import json
+import hashlib
 import tempfile
-from bpy.props import (StringProperty, IntProperty, BoolProperty, 
+from bpy.props import (StringProperty, IntProperty, BoolProperty,
                        EnumProperty, CollectionProperty, PointerProperty)
 from bpy.types import PropertyGroup
 
-def _normalized_dir(path):
-    if not path:
-        return ""
-    return os.path.normpath(os.path.abspath(bpy.path.abspath(path)))
-
-
-def _runtime_cache_root():
-    base = bpy.utils.user_resource('CONFIG') or tempfile.gettempdir()
-    return os.path.join(base, "meshy_automodel_runtime")
-
-
-def runtime_state_filepath():
-    return os.path.join(_runtime_cache_root(), "session_state.json")
-
-
-MAX_SOURCE_DIRECTORY_HISTORY = 12
-
-
-def _coerce_source_directory_list(raw_paths, existing_only=False):
-    paths = []
-    seen = set()
-    for raw_path in raw_paths or []:
-        if isinstance(raw_path, dict):
-            raw_path = raw_path.get("path", "")
-        if not raw_path:
-            continue
-        try:
-            path = _normalized_dir(raw_path)
-        except Exception:
-            continue
-        if existing_only and not os.path.isdir(path):
-            continue
-        key = os.path.realpath(path)
-        if key in seen:
-            continue
-        seen.add(key)
-        paths.append(path)
-    return paths[:MAX_SOURCE_DIRECTORY_HISTORY]
-
-
-def _source_directory_enum_items(self, context):
-    paths = self.get_source_directories(existing_only=True)
-    if not paths:
-        return [('NONE', "无可切换输入源", "请先设置源目录")]
-
-    items = []
-    for idx, path in enumerate(paths):
-        basename = os.path.basename(os.path.normpath(path)) or path
-        label = f"当前: {basename}" if path == _normalized_dir(self.source_directory) else basename
-        items.append((f"SRC_{idx}", label, path, 'FILE_FOLDER', idx))
-    return items
-
-
 _MESHY_MODEL_STATUS_IDS = frozenset({
-    'UNMARKED', 'COMPLETED', 'NO_ACTION', 'QUESTIONABLE',
+    'UNMARKED', 'COMPLETED', 'FIXED', 'NO_ACTION', 'QUESTIONABLE',
     'UNFIXABLE', 'HARD', 'PARTS',
 })
+
+HARDFIX_TAG_ITEMS = (
+    ('SOURCE_ABNORMAL', "原始模型异常", "源 GLB 自身异常，无法进入修复流程"),
+    ('PARTS', "零部件类", "模型属于零部件类，归档到 HardFix"),
+    ('HARD_TO_FIX', "难以修复", "修复成本过高或当前无法修复"),
+    ('OTHER', "其他", "其他原因，必须填写理由"),
+)
+HARDFIX_TAG_IDS = frozenset(item[0] for item in HARDFIX_TAG_ITEMS)
 
 
 def _coerce_meshy_model_status(value, default='UNMARKED'):
     if isinstance(value, str) and value in _MESHY_MODEL_STATUS_IDS:
         return value
     return default
+
+
+def _coerce_hardfix_tag(value, default='HARD_TO_FIX'):
+    if isinstance(value, str) and value in HARDFIX_TAG_IDS:
+        return value
+    return default
+
+
+def _normalized_dir(path):
+    if not path:
+        return ""
+    try:
+        path = bpy.path.abspath(path)
+    except Exception:
+        pass
+    return os.path.normpath(path)
+
+
+def ensure_directory_writable(path):
+    path = _normalized_dir(path)
+    if not path:
+        return False, "empty path"
+
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError as e:
+        return False, str(e)
+
+    probe_name = f".meshy_write_probe_{os.getpid()}.tmp"
+    probe_path = os.path.join(path, probe_name)
+    try:
+        with open(probe_path, 'w', encoding='utf-8') as f:
+            f.write("ok")
+    except OSError as e:
+        return False, str(e)
+    finally:
+        try:
+            if os.path.exists(probe_path):
+                os.remove(probe_path)
+        except OSError:
+            pass
+
+    return True, ""
+
+
+def _runtime_cache_root():
+    base = bpy.utils.user_resource('CONFIG') or tempfile.gettempdir()
+    return os.path.join(base, "meshy_autoglb_runtime")
+
+
+def runtime_state_filepath():
+    return os.path.join(_runtime_cache_root(), "session_state.json")
+
+
+def _runtime_cache_dir(source_directory, purpose):
+    source_key = _normalized_dir(source_directory) or "no_source"
+    digest = hashlib.sha1(source_key.encode('utf-8')).hexdigest()[:10]
+    source_name = os.path.basename(source_key.rstrip("\\/")) or "workspace"
+    safe_name = "".join(ch if ch.isalnum() or ch in ('-', '_') else "_" for ch in source_name)
+    return os.path.join(_runtime_cache_root(), purpose, f"{safe_name}_{digest}")
+
+
+def _explicit_fallback_dir(settings, purpose):
+    base = _normalized_dir(settings.local_fallback_directory)
+    if not base:
+        return ""
+    return os.path.join(base, purpose)
+
+
+def _store_runtime_resolution(settings, resolved_dir, warning):
+    settings.resolved_output_directory = resolved_dir or ""
+    settings.last_path_warning = warning or ""
+
+
+def resolve_output_base_directory(settings):
+    preferred = settings.output_directory
+    if not preferred:
+        if settings.source_directory:
+            preferred = _normalized_dir(settings.source_directory)
+            settings.output_directory = preferred
+        else:
+            _store_runtime_resolution(settings, "", "")
+            return ""
+
+    preferred = _normalized_dir(preferred)
+    ok, err = ensure_directory_writable(preferred)
+    if ok:
+        _store_runtime_resolution(settings, preferred, "")
+        return preferred
+
+    explicit_fallback = _explicit_fallback_dir(settings, "exports")
+    if explicit_fallback:
+        explicit_ok, explicit_err = ensure_directory_writable(explicit_fallback)
+        if explicit_ok:
+            _store_runtime_resolution(
+                settings,
+                explicit_fallback,
+                f"输出目录不可写，已回退到用户设置的本地目录: {preferred} ({err})",
+            )
+            return explicit_fallback
+    else:
+        explicit_err = "not configured"
+
+    fallback = _runtime_cache_dir(settings.source_directory, "exports")
+    fallback_ok, fallback_err = ensure_directory_writable(fallback)
+    if fallback_ok:
+        _store_runtime_resolution(
+            settings,
+            fallback,
+            f"输出目录不可写，已回退到自动本地缓存: {preferred} ({err})",
+        )
+        return fallback
+
+    _store_runtime_resolution(
+        settings,
+        "",
+        (
+            f"输出目录与回退目录均不可写: {preferred} ({err}); "
+            f"{explicit_fallback or '未配置显式回退目录'} ({explicit_err}); "
+            f"{fallback} ({fallback_err})"
+        ),
+    )
+    return ""
+
+
+def resolve_progress_filepath(settings):
+    if not settings.source_directory:
+        settings.resolved_progress_directory = ""
+        return ""
+
+    preferred_dir = os.path.join(_normalized_dir(settings.source_directory), ".progress")
+    ok, err = ensure_directory_writable(preferred_dir)
+    if ok:
+        settings.resolved_progress_directory = preferred_dir
+        return os.path.join(preferred_dir, "progress.json")
+
+    explicit_fallback_dir = _explicit_fallback_dir(settings, "progress")
+    if explicit_fallback_dir:
+        explicit_ok, explicit_err = ensure_directory_writable(explicit_fallback_dir)
+        if explicit_ok:
+            settings.resolved_progress_directory = explicit_fallback_dir
+            settings.last_path_warning = (
+                f"进度目录不可写，已回退到用户设置的本地目录: {preferred_dir} ({err})"
+            )
+            return os.path.join(explicit_fallback_dir, "progress.json")
+    else:
+        explicit_err = "not configured"
+
+    fallback_dir = _runtime_cache_dir(settings.source_directory, "progress")
+    fallback_ok, fallback_err = ensure_directory_writable(fallback_dir)
+    if fallback_ok:
+        settings.resolved_progress_directory = fallback_dir
+        settings.last_path_warning = (
+            f"进度目录不可写，已回退到自动本地缓存: {preferred_dir} ({err})"
+        )
+        return os.path.join(fallback_dir, "progress.json")
+
+    settings.resolved_progress_directory = ""
+    settings.last_path_warning = (
+        f"进度目录与回退目录均不可写: {preferred_dir} ({err}); "
+        f"{explicit_fallback_dir or '未配置显式回退目录'} ({explicit_err}); "
+        f"{fallback_dir} ({fallback_err})"
+    )
+    return ""
 
 
 # 模型项目类
@@ -80,11 +200,12 @@ class ModelItem(PropertyGroup):
         name="状态",
         items=[
             ('UNMARKED', "未标记", "尚未进行处理"),
-            ('COMPLETED', "可修复", "已修复并完成"),
-            ('NO_ACTION', "good", "无需进行任何处理"),
+            ('COMPLETED', "可修复", "需要人工修复的中间状态"),
+            ('FIXED', "已修复", "已修复并导出"),
+            ('NO_ACTION', "无需修复", "无需进行任何处理"),
             ('QUESTIONABLE', "存疑", "有问题，待确认"),
             ('UNFIXABLE', "bad", "无法修复的问题"),
-            ('HARD', "hard", "hard 分类"),
+            ('HARD', "难以修复", "难以修复并需填写原因"),
             ('PARTS', "零件", "判定为零件"),
         ],
         default='UNMARKED'
@@ -93,23 +214,38 @@ class ModelItem(PropertyGroup):
     # 导出历史记录
     export_history: StringProperty(name="导出历史")
     
+    # 难以修复原因
+    hardfix_reason: StringProperty(
+        name="其他理由",
+        description="归档分类为其他时必须填写的理由",
+        default=""
+    )
+
+    hardfix_tag: EnumProperty(
+        name="归档分类",
+        description="难以修复并归档时写入报告的分类 Tag",
+        items=HARDFIX_TAG_ITEMS,
+        default='HARD_TO_FIX'
+    )
+    
     # 上次导出的状态
     last_exported_status: EnumProperty(
         name="上次导出状态",
         items=[
             ('UNMARKED', "未标记", ""),
             ('COMPLETED', "可修复", ""),
-            ('NO_ACTION', "good", ""),
+            ('FIXED', "已修复", ""),
+            ('NO_ACTION', "无需修复", ""),
             ('QUESTIONABLE', "存疑", ""),
             ('UNFIXABLE', "bad", ""),
-            ('HARD', "hard", ""),
+            ('HARD', "难以修复", ""),
             ('PARTS', "零件", ""),
         ],
         default='UNMARKED'
     )
 
 # 用户配置属性
-class MeshyAutoModelSettings(PropertyGroup):
+class MeshyAutoGLBSettings(PropertyGroup):
     operator_name: StringProperty(
         name="操作者姓名",
         description="当前操作者的姓名",
@@ -127,43 +263,18 @@ class MeshyAutoModelSettings(PropertyGroup):
     
     source_directory: StringProperty(
         name="源目录",
-        description="包含GLB/USDZ模型的源目录",
+        description="包含GLB模型的源目录",
         default="",
         subtype='DIR_PATH',
         options={'SKIP_SAVE'}  # 不保存此属性
-    )
-
-    source_directories_json: StringProperty(
-        name="输入源历史",
-        description="最近使用的输入源目录列表",
-        default="[]",
-        options={'SKIP_SAVE'}
-    )
-
-    source_directory_choice: EnumProperty(
-        name="输入源",
-        description="选择已记录的输入源目录",
-        items=_source_directory_enum_items,
-        options={'SKIP_SAVE'}
     )
     
     output_directory: StringProperty(
         name="输出目录",
-        description="导出GLB/USDZ模型的目录",
+        description="导出GLB模型的目录",
         default="",
         subtype='DIR_PATH',
         options={'SKIP_SAVE'}  # 不保存此属性
-    )
-
-    output_format: EnumProperty(
-        name="导出格式",
-        description="导出模型文件的格式；默认沿用GLB版本",
-        items=[
-            ('GLB', "GLB", "按原GLB流程导出.glb"),
-            ('USDZ', "USDZ", "导出.usdz，状态流转仍沿用GLB版本"),
-        ],
-        default='GLB',
-        options={'SKIP_SAVE'}
     )
     
     # 当前模型索引
@@ -181,13 +292,44 @@ class MeshyAutoModelSettings(PropertyGroup):
         default="",
         options={'SKIP_SAVE'}  # 不保存此属性
     )
-    
+
+    last_audit_path: StringProperty(
+        name="上次缺漏核对路径",
+        description="最近一次导出缺漏核对CSV路径",
+        default="",
+        options={'SKIP_SAVE'}
+    )
+
     # 进度自动保存
     auto_save_progress: BoolProperty(
         name="自动保存进度",
         description="自动保存处理进度",
         default=True,
         options={'SKIP_SAVE'}  # 不保存此属性
+    )
+
+    normal_export_mode: EnumProperty(
+        name="法线导出",
+        description="控制 GLB 导出时是否写入 normals；自动模式会跟随源 GLB 是否包含 normals",
+        items=[
+            ('AUTO', "自动", "源文件有 normals 则导出；源文件无 normals 则不导出，避免 manifold 文件被拆顶点"),
+            ('OFF', "不导出", "始终不导出 normals，优先保持拓扑连通"),
+            ('ON', "导出", "始终导出 normals，优先保持当前显示法线"),
+        ],
+        default='AUTO',
+        options={'SKIP_SAVE'}
+    )
+
+    texcoord_export_mode: EnumProperty(
+        name="UV导出",
+        description="控制 GLB 导出时是否写入 UV/TEXCOORD；自动模式会跟随源 GLB 是否包含 UV",
+        items=[
+            ('AUTO', "自动", "源文件有 UV 则导出；源文件无 UV 则不导出，避免布尔辅助物体引入 UV"),
+            ('OFF', "不导出", "始终不导出 UV/TEXCOORD"),
+            ('ON', "导出", "始终导出 UV/TEXCOORD"),
+        ],
+        default='AUTO',
+        options={'SKIP_SAVE'}
     )
     
     # 进度缓存目录
@@ -197,6 +339,35 @@ class MeshyAutoModelSettings(PropertyGroup):
         default="",  # 将使用源目录作为进度缓存目录
         subtype='DIR_PATH',
         options={'SKIP_SAVE'}  # 不保存此属性
+    )
+
+    local_fallback_directory: StringProperty(
+        name="本地回退目录",
+        description="NAS 或共享目录不可写时，导出与进度优先回退到这里",
+        default="",
+        subtype='DIR_PATH',
+        options={'SKIP_SAVE'}
+    )
+
+    resolved_output_directory: StringProperty(
+        name="实际输出目录",
+        description="当前实际使用的输出目录",
+        default="",
+        options={'SKIP_SAVE'}
+    )
+
+    resolved_progress_directory: StringProperty(
+        name="实际进度目录",
+        description="当前实际使用的进度目录",
+        default="",
+        options={'SKIP_SAVE'}
+    )
+
+    last_path_warning: StringProperty(
+        name="路径告警",
+        description="最近一次路径回退或权限告警",
+        default="",
+        options={'SKIP_SAVE'}
     )
     
     # 最后保存时间
@@ -242,74 +413,21 @@ class MeshyAutoModelSettings(PropertyGroup):
     
     # 获取进度文件路径
     def get_progress_filepath(self):
-        # 如果没有设置源目录，则返回空
-        if not self.source_directory:
-            return ""
-            
-        # 使用源目录作为进度缓存目录
-        progress_dir = os.path.join(self.source_directory, ".progress")
-        
-        # 构建进度文件名：progress.json - 每个源目录只有一个进度文件
-        progress_filename = "progress.json"
-        return os.path.join(progress_dir, progress_filename)
-
-    def get_source_directories(self, include_current=True, existing_only=False):
-        raw_paths = []
-        if include_current and self.source_directory:
-            raw_paths.append(self.source_directory)
-        try:
-            stored_paths = json.loads(self.source_directories_json or "[]")
-            if isinstance(stored_paths, list):
-                raw_paths.extend(stored_paths)
-        except Exception:
-            pass
-        return _coerce_source_directory_list(raw_paths, existing_only=existing_only)
-
-    def set_source_directories(self, paths):
-        source_paths = _coerce_source_directory_list(paths)
-        self.source_directories_json = json.dumps(
-            source_paths,
-            ensure_ascii=False,
-            separators=(',', ':'),
-        )
-        self.source_directory_choice = "SRC_0" if source_paths else "NONE"
-
-    def remember_source_directory(self, path=None):
-        path = path or self.source_directory
-        if not path:
-            return
-        source_paths = [path]
-        source_paths.extend(self.get_source_directories(include_current=False))
-        self.set_source_directories(source_paths)
-
-    def resolve_source_directory_choice(self, choice=None):
-        choice = choice or self.source_directory_choice
-        if not choice or choice == "NONE":
-            return ""
-        if not choice.startswith("SRC_"):
-            return ""
-        try:
-            idx = int(choice.split("_", 1)[1])
-        except Exception:
-            return ""
-        paths = self.get_source_directories(existing_only=True)
-        if idx < 0 or idx >= len(paths):
-            return ""
-        return paths[idx]
+        return resolve_progress_filepath(self)
 
     def save_runtime_state(self):
         state_path = runtime_state_filepath()
+        state_dir = os.path.dirname(state_path)
         try:
-            os.makedirs(os.path.dirname(state_path), exist_ok=True)
-            source_paths = self.get_source_directories()
+            os.makedirs(state_dir, exist_ok=True)
             data = {
                 "src": self.source_directory or "",
-                "sources": source_paths,
                 "out": self.output_directory or "",
+                "fallback": self.local_fallback_directory or "",
                 "op": self.operator_name or "",
                 "idx": int(self.current_model_index),
-                "lst": self.last_export_path or "",
-                "fmt": self.output_format or "GLB",
+                "normal_mode": self.normal_export_mode,
+                "texcoord_mode": self.texcoord_export_mode,
             }
             with open(state_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, separators=(',', ':'))
@@ -325,25 +443,23 @@ class MeshyAutoModelSettings(PropertyGroup):
         try:
             with open(state_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            stored_sources = data.get("sources", [])
-            if not isinstance(stored_sources, list):
-                stored_sources = []
-            source_candidates = [data.get("src", "") or ""]
-            source_candidates.extend(stored_sources)
-            source_paths = _coerce_source_directory_list(source_candidates)
-            existing_source_paths = _coerce_source_directory_list(source_paths, existing_only=True)
-            if not existing_source_paths:
-                return False
-            source_directory = existing_source_paths[0]
-            self.source_directory = source_directory
-            self.set_source_directories(source_paths)
-            self.output_directory = data.get("out", "") or ""
+            self.source_directory = data.get("src", "") or ""
+            saved_output_directory = data.get("out", "") or ""
+            source_dir = _normalized_dir(self.source_directory)
+            saved_output_dir = _normalized_dir(saved_output_directory)
+            legacy_auto_output_dir = os.path.dirname(source_dir) if source_dir else ""
+            if source_dir and saved_output_dir == legacy_auto_output_dir:
+                self.output_directory = source_dir
+            else:
+                self.output_directory = saved_output_directory
+            self.local_fallback_directory = data.get("fallback", "") or ""
             self.operator_name = data.get("op", "") or ""
             self.current_model_index = int(data.get("idx", 0) or 0)
-            self.last_export_path = data.get("lst", "") or ""
-            saved_format = data.get("fmt", "GLB")
-            self.output_format = saved_format if saved_format in {'GLB', 'USDZ'} else 'GLB'
-            return bool(self.source_directory)
+            normal_mode = data.get("normal_mode", "AUTO")
+            self.normal_export_mode = normal_mode if normal_mode in {'AUTO', 'OFF', 'ON'} else 'AUTO'
+            texcoord_mode = data.get("texcoord_mode", "AUTO")
+            self.texcoord_export_mode = texcoord_mode if texcoord_mode in {'AUTO', 'OFF', 'ON'} else 'AUTO'
+            return True
         except Exception as e:
             print(f"加载运行态失败: {e}")
             return False
@@ -405,6 +521,8 @@ class MeshyAutoModelSettings(PropertyGroup):
                 "s": model.status,
                 "h": model.export_history or "",
                 "lx": model.last_exported_status,
+                "t": model.hardfix_tag,
+                "r": model.hardfix_reason or "",
             })
         
         # 构建极简进度数据
@@ -421,12 +539,12 @@ class MeshyAutoModelSettings(PropertyGroup):
             
         if self.output_directory:
             progress_data["out"] = self.output_directory
+
+        if self.local_fallback_directory:
+            progress_data["fallback"] = self.local_fallback_directory
             
         if self.last_export_path:
             progress_data["lst"] = self.last_export_path
-
-        if self.output_format:
-            progress_data["fmt"] = self.output_format
         
         # 保存到JSON文件 - 极简格式
         try:
@@ -464,12 +582,18 @@ class MeshyAutoModelSettings(PropertyGroup):
                 self.operator_name = stored_operator
             
             # 恢复设置 - 适配新旧字段名
-            self.output_directory = progress_data.get("out", progress_data.get("output_directory", ""))
+            saved_output_directory = progress_data.get("out", progress_data.get("output_directory", ""))
+            source_dir = _normalized_dir(self.source_directory)
+            saved_output_dir = _normalized_dir(saved_output_directory)
+            legacy_auto_output_dir = os.path.dirname(source_dir) if source_dir else ""
+            if source_dir and saved_output_dir == legacy_auto_output_dir:
+                self.output_directory = source_dir
+            else:
+                self.output_directory = saved_output_directory
+            self.local_fallback_directory = progress_data.get("fallback", progress_data.get("local_fallback_directory", ""))
             self.current_model_index = progress_data.get("idx", progress_data.get("current_model_index", 0))
             self.last_export_path = progress_data.get("lst", progress_data.get("last_export_path", ""))
             self.last_save_time = progress_data.get("time", progress_data.get("last_save_time", ""))
-            saved_format = progress_data.get("fmt", progress_data.get("output_format", "GLB"))
-            self.output_format = saved_format if saved_format in {'GLB', 'USDZ'} else 'GLB'
             
             # 恢复模型列表和状态
             models_data = progress_data.get("models", [])
@@ -486,6 +610,10 @@ class MeshyAutoModelSettings(PropertyGroup):
                     model_data.get("s", model_data.get("status", "UNMARKED"))
                 )
                 model.export_history = model_data.get("h", model_data.get("export_history", "")) or ""
+                model.hardfix_tag = _coerce_hardfix_tag(
+                    model_data.get("t", model_data.get("hardfix_tag", "HARD_TO_FIX"))
+                )
+                model.hardfix_reason = model_data.get("r", model_data.get("hardfix_reason", "")) or ""
                 model.last_exported_status = _coerce_meshy_model_status(
                     model_data.get("lx", model_data.get("last_exported_status", "UNMARKED")),
                     "UNMARKED",
@@ -499,17 +627,19 @@ class MeshyAutoModelSettings(PropertyGroup):
                         hist_empty
                         and model_status not in ['UNMARKED', 'COMPLETED']
                     ):
-                        op_suffix = self.operator_name or "unknown"
+                        op_suffix = (self.operator_name or "unknown").replace("/", "_").replace("\\", "_")
                         status_folders = {
-                            'NO_ACTION': f"Good_{op_suffix}",
+                            'NO_ACTION': f"NoLogo_{op_suffix}",
+                            'FIXED': f"Fixed_{op_suffix}",
                             'QUESTIONABLE': f"Questionable_{op_suffix}",
                             'UNFIXABLE': f"Bad_{op_suffix}",
-                            'HARD': f"Hard_{op_suffix}",
+                            'HARD': f"HardFix_{op_suffix}",
                             'PARTS': f"Parts_{op_suffix}",
                         }
                         legacy_folder_lists = {
-                            'NO_ACTION': (f"NoAction_{op_suffix}", f"good_{op_suffix}"),
+                            'NO_ACTION': (f"Good_{op_suffix}", f"NoAction_{op_suffix}", f"good_{op_suffix}"),
                             'UNFIXABLE': (f"Unfixable_{op_suffix}", f"bad_{op_suffix}"),
+                            'HARD': (f"Hard_{op_suffix}",),
                         }
                         
                         if self.output_directory and model_status in status_folders:
@@ -527,6 +657,10 @@ class MeshyAutoModelSettings(PropertyGroup):
                                             model.last_exported_status = _coerce_meshy_model_status(
                                                 json_data["status"], "UNMARKED"
                                             )
+                                        if "hardfix_tag" in json_data:
+                                            model.hardfix_tag = _coerce_hardfix_tag(json_data["hardfix_tag"])
+                                        if "hardfix_reason" in json_data:
+                                            model.hardfix_reason = json_data["hardfix_reason"] or ""
                                     break
                 except Exception as e:
                     print(f"无法恢复模型附加信息: {str(e)}")
