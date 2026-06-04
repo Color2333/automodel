@@ -37,7 +37,7 @@ class MESHY_PT_MainPanel(Panel):
         settings = context.scene.meshy_settings
         
         # 直接写死版本号，确保显示正确
-        version = "4.6.5"
+        version = "4.6.6"
         
         row = layout.row()
         row.label(text=f"版本: {version}", icon='PLUGIN')
@@ -138,12 +138,21 @@ class MESHY_PT_MainPanel(Panel):
             row = status_box.row()
             les = current_model.last_exported_status
             row.label(text=f"上次导出状态: {ui_status_labels.get(les, les)}")
+
+        mark_mode_labels = {
+            'WHOLE_MODEL': "整体模型",
+            'SELECTED_OBJECTS': "仅选中对象",
+        }
+        row = status_box.row()
+        row.label(text=f"打标模式: {mark_mode_labels.get(settings.mark_mode, settings.mark_mode)}")
         
         # 调整UI顺序，先显示状态标记按钮
         
         # 状态标记按钮
         status_box = layout.box()
         status_box.label(text="状态标记:", icon='CHECKMARK')
+        row = status_box.row(align=True)
+        row.prop(settings, "mark_mode", text="", expand=True)
         
         row = status_box.row(align=True)
         op = row.operator("meshy.mark_status", text="good", icon='FILE_TICK')

@@ -14,7 +14,7 @@
 bl_info = {
     "name": "Meshy-AutoModel",
     "author": "Meshy Tech",
-    "version": (4, 6, 5),
+    "version": (4, 6, 6),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > Meshy-AutoModel",
     "description": "GLB/USDZ模型管理、修复和状态追踪工具",

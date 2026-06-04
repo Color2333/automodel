@@ -194,6 +194,44 @@ def list_model_exports_in_dir(directory, model_name, extensions=OUTPUT_FILE_EXTE
     return sorted(seen)
 
 
+def _model_export_index(filename, model_name):
+    stem, ext = os.path.splitext(filename)
+    if ext.lower() not in OUTPUT_FILE_EXTENSIONS:
+        return None
+    key = _nfc_filename(model_name)
+    base = _nfc_filename(stem)
+    if base == key:
+        return 0
+    prefix = key + "_"
+    if base.startswith(prefix) and base[len(prefix):].isdigit():
+        return int(base[len(prefix):])
+    return None
+
+
+def next_model_export_index(context, model):
+    """返回跨所有输出分类目录的下一个 model_N 编号。"""
+    settings = context.scene.meshy_settings
+    base = output_base_directory(settings)
+    if not base:
+        return 1
+
+    op_suffix = _meshy_operator_folder_suffix(settings)
+    statuses = ('COMPLETED',) + TERMINAL_EXPORT_STATUSES
+    max_index = 0
+    for status in statuses:
+        subdir = status_subdir_for_export(status, op_suffix)
+        if not subdir:
+            continue
+        directory = os.path.join(base, subdir)
+        if not os.path.isdir(directory):
+            continue
+        for filename in os.listdir(directory):
+            index = _model_export_index(filename, model.name)
+            if index is not None:
+                max_index = max(max_index, index)
+    return max_index + 1
+
+
 def purge_model_exports_from_directory(
     directory,
     model_name,
@@ -770,6 +808,12 @@ class MESHY_OT_ExportModel(Operator):
         ],
         default='TOP_LEVEL'
     )
+
+    selected_group_index: IntProperty(
+        name="选中对象编号",
+        description="仅选中对象导出时使用的文件编号；0 表示不追加编号",
+        default=0,
+    )
     
     def execute(self, context):
         settings = context.scene.meshy_settings
@@ -801,8 +845,18 @@ class MESHY_OT_ExportModel(Operator):
                     self.report({'ERROR'}, "没有选中任何对象")
                     return {'CANCELLED'}
                 
-                # 导出选中的对象
-                if self.export_objects(context, current_model, context.selected_objects) == {'FINISHED'}:
+                objects = self.collect_selected_export_objects(context)
+                group_index = self.selected_group_index if self.selected_group_index > 0 else None
+                group_name = self.selected_group_name(context)
+
+                # 导出选中的对象；选中父级时会带上子对象。
+                if self.export_objects(
+                    context,
+                    current_model,
+                    objects,
+                    group_index=group_index,
+                    group_name=group_name,
+                ) == {'FINISHED'}:
                     return {'FINISHED'}
                 else:
                     return {'CANCELLED'}
@@ -1200,6 +1254,29 @@ class MESHY_OT_ExportModel(Operator):
             result_list.append(child)
             self.get_all_children(child, result_list)
 
+    def collect_selected_export_objects(self, context):
+        objects = []
+        seen = set()
+        for obj in context.selected_objects:
+            if obj.name not in seen:
+                objects.append(obj)
+                seen.add(obj.name)
+            descendants = []
+            self.get_all_children(obj, descendants)
+            for child in descendants:
+                if child.name not in seen:
+                    objects.append(child)
+                    seen.add(child.name)
+        return objects
+
+    def selected_group_name(self, context):
+        active = context.view_layer.objects.active
+        if active and active.select_get():
+            return active.name
+        if len(context.selected_objects) == 1:
+            return context.selected_objects[0].name
+        return "Selected"
+
 # 标记状态
 class MESHY_OT_MarkStatus(Operator):
     bl_idname = "meshy.mark_status"
@@ -1229,6 +1306,7 @@ class MESHY_OT_MarkStatus(Operator):
         current_model = models[settings.current_model_index]
         current_index = settings.current_model_index
         prev_status = current_model.status
+        selected_mark_mode = getattr(settings, "mark_mode", "WHOLE_MODEL") == 'SELECTED_OBJECTS'
         
         # 标为可修复只进入修复态；旧终态输出等重新完成分类后再清理，避免恢复/继续时先删成果。
         if self.status == 'COMPLETED':
@@ -1247,7 +1325,27 @@ class MESHY_OT_MarkStatus(Operator):
         
         # 终态：先完成导出/移动，再清理旧副本；失败路径不能删除已有成果。
         if self.status in TERMINAL_EXPORT_STATUSES:
-            if prev_status == 'COMPLETED':
+            if selected_mark_mode and prev_status != 'COMPLETED':
+                if not context.selected_objects:
+                    self.report({'ERROR'}, "没有选中任何对象")
+                    return {'CANCELLED'}
+                current_model.status = self.status
+                if not context.scene.objects:
+                    self.report({'ERROR'}, "场景中没有对象，无法导出")
+                    current_model.status = prev_status
+                    return {'CANCELLED'}
+
+                next_index = next_model_export_index(context, current_model)
+                result = bpy.ops.meshy.export_model(
+                    'EXEC_DEFAULT',
+                    export_mode='SELECTED',
+                    selected_group_index=next_index,
+                )
+                if result != {'FINISHED'}:
+                    current_model.status = prev_status
+                    self.report({'ERROR'}, "选中对象导出失败，状态已恢复")
+                    return {'CANCELLED'}
+            elif prev_status == 'COMPLETED':
                 ok, _ = move_completed_to_category(
                     context, current_model, self.status, self.report
                 )
@@ -1291,6 +1389,9 @@ class MESHY_OT_MarkStatus(Operator):
             self.report({'INFO'}, f"模型状态已标记为: {status_labels[self.status]}")
             if settings.auto_save_progress:
                 settings.save_progress(context, True)
+            if selected_mark_mode and prev_status != 'COMPLETED':
+                return {'FINISHED'}
+
             _meshy_delete_scene_checkpoint(context, current_model)
             
             if current_index < len(models) - 1:

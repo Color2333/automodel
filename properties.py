@@ -165,6 +165,17 @@ class MeshyAutoModelSettings(PropertyGroup):
         default='GLB',
         options={'SKIP_SAVE'}
     )
+
+    mark_mode: EnumProperty(
+        name="打标模式",
+        description="控制 good/bad 等状态按钮处理整模还是当前选择",
+        items=[
+            ('WHOLE_MODEL', "整体模型", "打标签时处理当前模型全部对象"),
+            ('SELECTED_OBJECTS', "仅选中对象", "打标签时只处理当前选中的对象"),
+        ],
+        default='WHOLE_MODEL',
+        options={'SKIP_SAVE'}
+    )
     
     # 当前模型索引
     current_model_index: IntProperty(
@@ -310,6 +321,7 @@ class MeshyAutoModelSettings(PropertyGroup):
                 "idx": int(self.current_model_index),
                 "lst": self.last_export_path or "",
                 "fmt": self.output_format or "GLB",
+                "mark": self.mark_mode or "WHOLE_MODEL",
             }
             with open(state_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, separators=(',', ':'))
@@ -343,6 +355,8 @@ class MeshyAutoModelSettings(PropertyGroup):
             self.last_export_path = data.get("lst", "") or ""
             saved_format = data.get("fmt", "GLB")
             self.output_format = saved_format if saved_format in {'GLB', 'USDZ'} else 'GLB'
+            saved_mark_mode = data.get("mark", "WHOLE_MODEL")
+            self.mark_mode = saved_mark_mode if saved_mark_mode in {'WHOLE_MODEL', 'SELECTED_OBJECTS'} else 'WHOLE_MODEL'
             return bool(self.source_directory)
         except Exception as e:
             print(f"加载运行态失败: {e}")
@@ -427,6 +441,9 @@ class MeshyAutoModelSettings(PropertyGroup):
 
         if self.output_format:
             progress_data["fmt"] = self.output_format
+
+        if self.mark_mode:
+            progress_data["mark"] = self.mark_mode
         
         # 保存到JSON文件 - 极简格式
         try:
@@ -470,6 +487,8 @@ class MeshyAutoModelSettings(PropertyGroup):
             self.last_save_time = progress_data.get("time", progress_data.get("last_save_time", ""))
             saved_format = progress_data.get("fmt", progress_data.get("output_format", "GLB"))
             self.output_format = saved_format if saved_format in {'GLB', 'USDZ'} else 'GLB'
+            saved_mark_mode = progress_data.get("mark", progress_data.get("mark_mode", "WHOLE_MODEL"))
+            self.mark_mode = saved_mark_mode if saved_mark_mode in {'WHOLE_MODEL', 'SELECTED_OBJECTS'} else 'WHOLE_MODEL'
             
             # 恢复模型列表和状态
             models_data = progress_data.get("models", [])
