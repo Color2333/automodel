@@ -44,6 +44,7 @@ classes = (
     operators.MESHY_OT_SwitchSourceDirectory,
     operators.MESHY_OT_ImportModel,
     operators.MESHY_OT_ExportModel,
+    operators.MESHY_OT_ToggleMarkMode,
     operators.MESHY_OT_MarkStatus,
     operators.MESHY_OT_PreviousModel,
     operators.MESHY_OT_NextModel,

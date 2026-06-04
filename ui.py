@@ -151,8 +151,14 @@ class MESHY_PT_MainPanel(Panel):
         # 状态标记按钮
         status_box = layout.box()
         status_box.label(text="状态标记:", icon='CHECKMARK')
-        row = status_box.row(align=True)
-        row.prop(settings, "mark_mode", text="", expand=True)
+        row = status_box.row()
+        mode_label = mark_mode_labels.get(settings.mark_mode, settings.mark_mode)
+        mode_icon = 'RESTRICT_SELECT_OFF' if settings.mark_mode == 'SELECTED_OBJECTS' else 'GROUP'
+        row.operator(
+            "meshy.toggle_mark_mode",
+            text=f"打标模式: {mode_label}",
+            icon=mode_icon,
+        )
         
         row = status_box.row(align=True)
         op = row.operator("meshy.mark_status", text="good", icon='FILE_TICK')

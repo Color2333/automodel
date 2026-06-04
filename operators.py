@@ -1278,6 +1278,24 @@ class MESHY_OT_ExportModel(Operator):
         return "Selected"
 
 # 标记状态
+class MESHY_OT_ToggleMarkMode(Operator):
+    bl_idname = "meshy.toggle_mark_mode"
+    bl_label = "切换打标模式"
+    bl_description = "在整体模型和仅选中对象打标模式之间切换"
+
+    def execute(self, context):
+        settings = context.scene.meshy_settings
+        if getattr(settings, "mark_mode", "WHOLE_MODEL") == 'SELECTED_OBJECTS':
+            settings.mark_mode = 'WHOLE_MODEL'
+        else:
+            settings.mark_mode = 'SELECTED_OBJECTS'
+
+        settings.save_runtime_state()
+        label = "仅选中对象" if settings.mark_mode == 'SELECTED_OBJECTS' else "整体模型"
+        self.report({'INFO'}, f"打标模式已切换为: {label}")
+        return {'FINISHED'}
+
+
 class MESHY_OT_MarkStatus(Operator):
     bl_idname = "meshy.mark_status"
     bl_label = "标记状态"
@@ -1972,6 +1990,7 @@ classes = [
     MESHY_OT_RefreshModelList,
     MESHY_OT_ImportModel,
     MESHY_OT_ExportModel,
+    MESHY_OT_ToggleMarkMode,
     MESHY_OT_MarkStatus,
     MESHY_OT_PreviousModel,
     MESHY_OT_NextModel,
