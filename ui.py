@@ -37,7 +37,7 @@ class MESHY_PT_MainPanel(Panel):
         settings = context.scene.meshy_settings
         
         # 直接写死版本号，确保显示正确
-        version = "4.6.6"
+        version = "4.6.7"
         
         row = layout.row()
         row.label(text=f"版本: {version}", icon='PLUGIN')
@@ -101,6 +101,8 @@ class MESHY_PT_MainPanel(Panel):
             'UNFIXABLE': "bad",
             'HARD': "hard",
             'PARTS': "零件",
+            'NOR_ERROR': "nor-error",
+            'COMBO_ASSET': "组合资产",
         }
         
         status_icons = {
@@ -111,6 +113,8 @@ class MESHY_PT_MainPanel(Panel):
             'UNFIXABLE': 'CANCEL',
             'HARD': 'MOD_PHYSICS',
             'PARTS': 'MESH_CUBE',
+            'NOR_ERROR': 'ERROR',
+            'COMBO_ASSET': 'GROUP',
         }
         status_colors = {
             'UNMARKED': (0.5, 0.5, 0.5),
@@ -120,6 +124,8 @@ class MESHY_PT_MainPanel(Panel):
             'UNFIXABLE': (0.8, 0.2, 0.2),
             'HARD': (0.7, 0.3, 0.9),
             'PARTS': (0.6, 0.6, 0.6),
+            'NOR_ERROR': (0.9, 0.45, 0.15),
+            'COMBO_ASSET': (0.2, 0.65, 0.45),
         }
         
         # 创建一个状态指示器
@@ -169,6 +175,12 @@ class MESHY_PT_MainPanel(Panel):
         op.status = 'UNFIXABLE'
         op = row.operator("meshy.mark_status", text="hard", icon='MOD_PHYSICS')
         op.status = 'HARD'
+
+        row = status_box.row(align=True)
+        op = row.operator("meshy.mark_status", text="nor-error", icon='ERROR')
+        op.status = 'NOR_ERROR'
+        op = row.operator("meshy.mark_status", text="组合资产", icon='GROUP')
+        op.status = 'COMBO_ASSET'
         
         row = status_box.row(align=True)
         row.scale_y = 1.5

@@ -2,7 +2,7 @@
 
 Blender add-on for Meshy GLB / USDZ model review, classification, repair workflow tracking, and export management.
 
-This repository stores Meshy Blender workflow plugins. The default `main` branch contains the AutoModel plugin (`Meshy-AutoModel`, version 4.6.6).
+This repository stores Meshy Blender workflow plugins. The default `main` branch contains the AutoModel plugin (`Meshy-AutoModel`, version 4.6.7).
 
 ## Branches
 

@@ -61,7 +61,7 @@ def _source_directory_enum_items(self, context):
 
 _MESHY_MODEL_STATUS_IDS = frozenset({
     'UNMARKED', 'COMPLETED', 'NO_ACTION', 'QUESTIONABLE',
-    'UNFIXABLE', 'HARD', 'PARTS',
+    'UNFIXABLE', 'HARD', 'PARTS', 'NOR_ERROR', 'COMBO_ASSET',
 })
 
 
@@ -86,6 +86,8 @@ class ModelItem(PropertyGroup):
             ('UNFIXABLE', "bad", "无法修复的问题"),
             ('HARD', "hard", "hard 分类"),
             ('PARTS', "零件", "判定为零件"),
+            ('NOR_ERROR', "nor-error", "nor-error 分类"),
+            ('COMBO_ASSET', "组合资产", "组合资产分类"),
         ],
         default='UNMARKED'
     )
@@ -104,6 +106,8 @@ class ModelItem(PropertyGroup):
             ('UNFIXABLE', "bad", ""),
             ('HARD', "hard", ""),
             ('PARTS', "零件", ""),
+            ('NOR_ERROR', "nor-error", ""),
+            ('COMBO_ASSET', "组合资产", ""),
         ],
         default='UNMARKED'
     )
@@ -525,6 +529,8 @@ class MeshyAutoModelSettings(PropertyGroup):
                             'UNFIXABLE': f"Bad_{op_suffix}",
                             'HARD': f"Hard_{op_suffix}",
                             'PARTS': f"Parts_{op_suffix}",
+                            'NOR_ERROR': f"NorError_{op_suffix}",
+                            'COMBO_ASSET': f"ComboAsset_{op_suffix}",
                         }
                         legacy_folder_lists = {
                             'NO_ACTION': (f"NoAction_{op_suffix}", f"good_{op_suffix}"),

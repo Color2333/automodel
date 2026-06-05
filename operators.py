@@ -19,6 +19,8 @@ status_labels = {
     'UNFIXABLE': "bad",
     'HARD': "hard",
     'PARTS': "零件",
+    'NOR_ERROR': "nor-error",
+    'COMBO_ASSET': "组合资产",
 }
 
 
@@ -36,6 +38,8 @@ def status_subdir_for_export(status, operator_suffix):
         'QUESTIONABLE': f"Questionable_{operator_suffix}",
         'HARD': f"Hard_{operator_suffix}",
         'PARTS': f"Parts_{operator_suffix}",
+        'NOR_ERROR': f"NorError_{operator_suffix}",
+        'COMBO_ASSET': f"ComboAsset_{operator_suffix}",
     }
     return mapping.get(status)
 
@@ -57,7 +61,10 @@ def _nfc_filename(s):
 
 
 # 终态：磁盘上有独立输出目录的状态（与 mark 自动导出一致）
-TERMINAL_EXPORT_STATUSES = ('NO_ACTION', 'QUESTIONABLE', 'UNFIXABLE', 'HARD', 'PARTS')
+TERMINAL_EXPORT_STATUSES = (
+    'NO_ACTION', 'QUESTIONABLE', 'UNFIXABLE', 'HARD', 'PARTS',
+    'NOR_ERROR', 'COMBO_ASSET',
+)
 SUPPORTED_SOURCE_EXTENSIONS = ('.glb', '.usdz')
 OUTPUT_FILE_EXTENSIONS = ('.glb', '.usdz')
 SCENE_CHECKPOINT_DIRNAME = "scene_checkpoints"
@@ -776,7 +783,10 @@ def ensure_status_directories(context, base_dir):
     """确保状态目录存在"""
     settings = context.scene.meshy_settings
     op_suffix = _meshy_operator_folder_suffix(settings)
-    keys = ('COMPLETED', 'NO_ACTION', 'QUESTIONABLE', 'UNFIXABLE', 'HARD', 'PARTS')
+    keys = (
+        'COMPLETED', 'NO_ACTION', 'QUESTIONABLE', 'UNFIXABLE', 'HARD',
+        'PARTS', 'NOR_ERROR', 'COMBO_ASSET',
+    )
     status_dirs = {}
     for k in keys:
         sub = status_subdir_for_export(k, op_suffix)
@@ -1310,6 +1320,8 @@ class MESHY_OT_MarkStatus(Operator):
             ('UNFIXABLE', "bad", "归类为 bad"),
             ('HARD', "hard", "归类为 hard"),
             ('PARTS', "零件", "判定为零件，无需处理"),
+            ('NOR_ERROR', "nor-error", "归类为 nor-error"),
+            ('COMBO_ASSET', "组合资产", "归类为组合资产"),
         ]
     )
     
