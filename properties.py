@@ -76,6 +76,15 @@ class ModelItem(PropertyGroup):
     name: StringProperty(name="名称")
     path: StringProperty(name="路径")
     preview_path: StringProperty(name="预览图路径")
+    source_type: EnumProperty(
+        name="来源类型",
+        items=[
+            ('SINGLE_FILE', "单体文件", "单个 GLB/USDZ 文件"),
+            ('MULTI_PART_FOLDER', "多体目录", "包含多个部件文件的目录"),
+        ],
+        default='SINGLE_FILE',
+    )
+    part_count: IntProperty(name="部件数量", default=0, min=0)
     status: EnumProperty(
         name="状态",
         items=[
@@ -167,6 +176,17 @@ class MeshyAutoModelSettings(PropertyGroup):
             ('USDZ', "USDZ", "导出.usdz，状态流转仍沿用GLB版本"),
         ],
         default='GLB',
+        options={'SKIP_SAVE'}
+    )
+
+    source_mode: EnumProperty(
+        name="输入模式",
+        description="控制源目录按单体 GLB/USDZ 文件还是多体子目录刷新任务",
+        items=[
+            ('SINGLE_FILE', "单 GLB/USDZ", "源目录下每个 GLB/USDZ 文件作为一个任务"),
+            ('MULTI_PART_FOLDER', "多体目录", "源目录下每个包含部件文件的子文件夹作为一个任务"),
+        ],
+        default='SINGLE_FILE',
         options={'SKIP_SAVE'}
     )
 
@@ -326,6 +346,7 @@ class MeshyAutoModelSettings(PropertyGroup):
                 "lst": self.last_export_path or "",
                 "fmt": self.output_format or "GLB",
                 "mark": self.mark_mode or "WHOLE_MODEL",
+                "src_mode": self.source_mode or "SINGLE_FILE",
             }
             with open(state_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, separators=(',', ':'))
@@ -361,6 +382,8 @@ class MeshyAutoModelSettings(PropertyGroup):
             self.output_format = saved_format if saved_format in {'GLB', 'USDZ'} else 'GLB'
             saved_mark_mode = data.get("mark", "WHOLE_MODEL")
             self.mark_mode = saved_mark_mode if saved_mark_mode in {'WHOLE_MODEL', 'SELECTED_OBJECTS'} else 'WHOLE_MODEL'
+            saved_source_mode = data.get("src_mode", "SINGLE_FILE")
+            self.source_mode = saved_source_mode if saved_source_mode in {'SINGLE_FILE', 'MULTI_PART_FOLDER'} else 'SINGLE_FILE'
             return bool(self.source_directory)
         except Exception as e:
             print(f"加载运行态失败: {e}")
@@ -423,6 +446,9 @@ class MeshyAutoModelSettings(PropertyGroup):
                 "s": model.status,
                 "h": model.export_history or "",
                 "lx": model.last_exported_status,
+                "t": model.source_type,
+                "pc": int(model.part_count),
+                "pv": model.preview_path or "",
             })
         
         # 构建极简进度数据
@@ -448,6 +474,9 @@ class MeshyAutoModelSettings(PropertyGroup):
 
         if self.mark_mode:
             progress_data["mark"] = self.mark_mode
+
+        if self.source_mode:
+            progress_data["src_mode"] = self.source_mode
         
         # 保存到JSON文件 - 极简格式
         try:
@@ -493,6 +522,8 @@ class MeshyAutoModelSettings(PropertyGroup):
             self.output_format = saved_format if saved_format in {'GLB', 'USDZ'} else 'GLB'
             saved_mark_mode = progress_data.get("mark", progress_data.get("mark_mode", "WHOLE_MODEL"))
             self.mark_mode = saved_mark_mode if saved_mark_mode in {'WHOLE_MODEL', 'SELECTED_OBJECTS'} else 'WHOLE_MODEL'
+            saved_source_mode = progress_data.get("src_mode", progress_data.get("source_mode", "SINGLE_FILE"))
+            self.source_mode = saved_source_mode if saved_source_mode in {'SINGLE_FILE', 'MULTI_PART_FOLDER'} else 'SINGLE_FILE'
             
             # 恢复模型列表和状态
             models_data = progress_data.get("models", [])
@@ -505,6 +536,13 @@ class MeshyAutoModelSettings(PropertyGroup):
                 model = context.scene.meshy_models.add()
                 model.name = model_data.get("n", model_data.get("name", ""))
                 model.path = model_data.get("p", model_data.get("path", ""))
+                source_type = model_data.get("t", model_data.get("source_type", "SINGLE_FILE"))
+                model.source_type = source_type if source_type in {'SINGLE_FILE', 'MULTI_PART_FOLDER'} else 'SINGLE_FILE'
+                try:
+                    model.part_count = int(model_data.get("pc", model_data.get("part_count", 0)) or 0)
+                except Exception:
+                    model.part_count = 0
+                model.preview_path = model_data.get("pv", model_data.get("preview_path", "")) or ""
                 model.status = _coerce_meshy_model_status(
                     model_data.get("s", model_data.get("status", "UNMARKED"))
                 )

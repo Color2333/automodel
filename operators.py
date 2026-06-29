@@ -66,6 +66,7 @@ TERMINAL_EXPORT_STATUSES = (
     'NOR_ERROR', 'COMBO_ASSET',
 )
 SUPPORTED_SOURCE_EXTENSIONS = ('.glb', '.usdz')
+MULTI_PART_SOURCE_EXTENSIONS = ('.stl', '.obj', '.fbx', '.glb')
 OUTPUT_FILE_EXTENSIONS = ('.glb', '.usdz')
 SCENE_CHECKPOINT_DIRNAME = "scene_checkpoints"
 _MESHY_CHECKPOINT_SAVING = False
@@ -79,6 +80,118 @@ def current_output_extension(settings):
 
 def current_output_label(settings):
     return "USDZ" if current_output_extension(settings) == ".usdz" else "GLB"
+
+
+def _safe_view_all():
+    try:
+        bpy.ops.view3d.view_all(center=False)
+    except Exception:
+        pass
+
+
+def _safe_object_name(name, fallback="Part"):
+    safe = "".join(ch if ch.isalnum() or ch in "._- " else "_" for ch in (name or "")).strip()
+    return safe or fallback
+
+
+def _iter_multi_part_files(folder):
+    files = []
+    for root, dirnames, filenames in os.walk(folder):
+        dirnames[:] = sorted(
+            [d for d in dirnames if not d.startswith(".")],
+            key=lambda value: _nfc_filename(value).lower(),
+        )
+        for filename in sorted(filenames, key=lambda value: _nfc_filename(value).lower()):
+            if filename.startswith("."):
+                continue
+            ext = os.path.splitext(filename)[1].lower()
+            if ext in MULTI_PART_SOURCE_EXTENSIONS:
+                files.append(os.path.join(root, filename))
+    return files
+
+
+def _find_multi_part_preview(folder):
+    try:
+        images = [
+            name for name in os.listdir(folder)
+            if os.path.isfile(os.path.join(folder, name))
+            and os.path.splitext(name)[1].lower() in {'.png', '.jpg', '.jpeg'}
+        ]
+    except OSError:
+        return ""
+    if not images:
+        return ""
+    merged = [name for name in images if name.lower().startswith("merged_")]
+    chosen = sorted(merged or images, key=lambda value: _nfc_filename(value).lower())[0]
+    return os.path.join(folder, chosen)
+
+
+def _import_single_part_file(filepath):
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext == '.stl':
+        if hasattr(bpy.ops.wm, "stl_import"):
+            bpy.ops.wm.stl_import(filepath=filepath)
+        else:
+            raise RuntimeError("当前Blender版本不支持STL导入")
+    elif ext == '.obj':
+        if hasattr(bpy.ops.wm, "obj_import"):
+            bpy.ops.wm.obj_import(filepath=filepath)
+        elif hasattr(bpy.ops.import_scene, "obj"):
+            bpy.ops.import_scene.obj(filepath=filepath)
+        else:
+            raise RuntimeError("当前Blender版本不支持OBJ导入")
+    elif ext == '.fbx':
+        bpy.ops.import_scene.fbx(filepath=filepath)
+    elif ext == '.glb':
+        bpy.ops.import_scene.gltf(
+            filepath=filepath,
+            import_pack_images=False,
+            guess_original_bind_pose=False,
+        )
+    else:
+        raise RuntimeError(f"不支持的多体部件格式: {filepath}")
+
+
+def _parent_imported_objects(context, objects, parent_name):
+    if not objects:
+        return None
+
+    parent = bpy.data.objects.new(_safe_object_name(parent_name), None)
+    parent.empty_display_type = 'PLAIN_AXES'
+    context.scene.collection.objects.link(parent)
+
+    object_set = set(objects)
+    root_objects = [obj for obj in objects if obj.parent not in object_set]
+    for obj in root_objects:
+        world_matrix = obj.matrix_world.copy()
+        obj.parent = parent
+        obj.matrix_world = world_matrix
+    return parent
+
+
+def _import_multi_part_folder(context, model, report_fn):
+    part_files = _iter_multi_part_files(model.path)
+    if not part_files:
+        report_fn({'ERROR'}, f"多体目录中未找到可导入部件: {model.path}")
+        return {'CANCELLED'}
+
+    imported_count = 0
+    for part_path in part_files:
+        before_objects = set(context.scene.objects)
+        _import_single_part_file(part_path)
+        new_objects = [obj for obj in context.scene.objects if obj not in before_objects]
+        if new_objects:
+            part_name = os.path.splitext(os.path.basename(part_path))[0]
+            _parent_imported_objects(context, new_objects, part_name)
+            imported_count += 1
+
+    if imported_count == 0:
+        report_fn({'ERROR'}, "多体目录导入后没有产生可用对象")
+        return {'CANCELLED'}
+
+    model.part_count = len(part_files)
+    report_fn({'INFO'}, f"已导入多体任务: {model.name} ({imported_count}/{len(part_files)} 个部件)")
+    return {'FINISHED'}
 
 
 def activate_source_directory(context, directory, report_fn=None):
@@ -612,6 +725,9 @@ class MESHY_OT_RefreshModelList(Operator):
                 "status": model.status,
                 "export_history": model.export_history,
                 "last_exported_status": model.last_exported_status,
+                "source_type": model.source_type,
+                "part_count": model.part_count,
+                "preview_path": model.preview_path,
             }
             if model.path:
                 cached_by_path[os.path.realpath(model.path)] = cached
@@ -621,39 +737,68 @@ class MESHY_OT_RefreshModelList(Operator):
         # 清空当前模型列表
         context.scene.meshy_models.clear()
         
-        # 查找所有GLB/USDZ文件；同名同时存在时以GLB作为源，避免同名模型重复进列表。
-        model_files_by_name = {}
-        for filename in os.listdir(settings.source_directory):
-            model_path = os.path.join(settings.source_directory, filename)
-            if not os.path.isfile(model_path):
-                continue
-            model_name, ext = os.path.splitext(filename)
-            ext = ext.lower()
-            if ext not in SUPPORTED_SOURCE_EXTENSIONS:
-                continue
-            current_path = model_files_by_name.get(model_name)
-            if current_path is None or ext == ".glb":
-                model_files_by_name[model_name] = model_path
+        if settings.source_mode == 'MULTI_PART_FOLDER':
+            model_entries = []
+            for dirname in os.listdir(settings.source_directory):
+                folder_path = os.path.join(settings.source_directory, dirname)
+                if dirname.startswith(".") or not os.path.isdir(folder_path):
+                    continue
+                part_files = _iter_multi_part_files(folder_path)
+                if not part_files:
+                    continue
+                model_entries.append({
+                    "name": dirname,
+                    "path": folder_path,
+                    "source_type": 'MULTI_PART_FOLDER',
+                    "part_count": len(part_files),
+                    "preview_path": _find_multi_part_preview(folder_path),
+                })
+            model_entries.sort(key=lambda item: _nfc_filename(item["name"]).lower())
+            not_found_message = "源目录中未找到包含 STL/OBJ/FBX/GLB 部件的子文件夹"
+        else:
+            # 查找所有GLB/USDZ文件；同名同时存在时以GLB作为源，避免同名模型重复进列表。
+            model_files_by_name = {}
+            for filename in os.listdir(settings.source_directory):
+                model_path = os.path.join(settings.source_directory, filename)
+                if not os.path.isfile(model_path):
+                    continue
+                model_name, ext = os.path.splitext(filename)
+                ext = ext.lower()
+                if ext not in SUPPORTED_SOURCE_EXTENSIONS:
+                    continue
+                current_path = model_files_by_name.get(model_name)
+                if current_path is None or ext == ".glb":
+                    model_files_by_name[model_name] = model_path
 
-        model_files = sorted(
-            model_files_by_name.values(),
-            key=lambda path: _nfc_filename(os.path.basename(path)).lower(),
-        )
+            model_files = sorted(
+                model_files_by_name.values(),
+                key=lambda path: _nfc_filename(os.path.basename(path)).lower(),
+            )
+            model_entries = [
+                {
+                    "name": os.path.splitext(os.path.basename(model_path))[0],
+                    "path": model_path,
+                    "source_type": 'SINGLE_FILE',
+                    "part_count": 0,
+                    "preview_path": "",
+                }
+                for model_path in model_files
+            ]
+            not_found_message = "源目录中未找到GLB或USDZ模型"
 
-        if not model_files:
-            self.report({'WARNING'}, "源目录中未找到GLB或USDZ模型")
+        if not model_entries:
+            self.report({'WARNING'}, not_found_message)
             return {'CANCELLED'}
-        
+
         # 添加模型到列表
-        for model_path in model_files:
-            filename = os.path.basename(model_path)
-            model_name = os.path.splitext(filename)[0]
-            
-            # 创建新模型项
+        for entry in model_entries:
             model_item = context.scene.meshy_models.add()
-            model_item.name = model_name
-            model_item.path = model_path
-            cached = cached_by_path.get(os.path.realpath(model_path)) or cached_by_name.get(model_name)
+            model_item.name = entry["name"]
+            model_item.path = entry["path"]
+            model_item.source_type = entry["source_type"]
+            model_item.part_count = entry["part_count"]
+            model_item.preview_path = entry["preview_path"]
+            cached = cached_by_path.get(os.path.realpath(entry["path"])) or cached_by_name.get(entry["name"])
             if cached:
                 model_item.status = cached["status"]
                 model_item.export_history = cached["export_history"]
@@ -670,7 +815,8 @@ class MESHY_OT_RefreshModelList(Operator):
             # 自动导入第一个模型
             bpy.ops.meshy.import_model()
         
-        self.report({'INFO'}, f"已找到 {len(context.scene.meshy_models)} 个模型")
+        task_label = "多体任务" if settings.source_mode == 'MULTI_PART_FOLDER' else "模型"
+        self.report({'INFO'}, f"已找到 {len(context.scene.meshy_models)} 个{task_label}")
         return {'FINISHED'}
 
 
@@ -743,27 +889,32 @@ class MESHY_OT_ImportModel(Operator):
         
         # 导入模型
         try:
-            # 根据路径判断导入函数
-            ext = os.path.splitext(current_model.path)[1].lower()
-            if ext == '.glb':
-                bpy.ops.import_scene.gltf(
-                    filepath=current_model.path,
-                    import_pack_images=False,
-                    guess_original_bind_pose=False,
-                )
-            elif ext == '.usdz':
-                if hasattr(bpy.ops.wm, "usd_import"):
-                    bpy.ops.wm.usd_import(filepath=current_model.path)
-                else:
-                    self.report({'ERROR'}, "当前Blender版本不支持USDZ导入")
-                    return {'CANCELLED'}
+            if current_model.source_type == 'MULTI_PART_FOLDER':
+                result = _import_multi_part_folder(context, current_model, self.report)
+                if result != {'FINISHED'}:
+                    return result
             else:
-                self.report({'ERROR'}, f"不支持的文件格式: {current_model.path}")
-                return {'CANCELLED'}
-            
+                # 根据路径判断导入函数
+                ext = os.path.splitext(current_model.path)[1].lower()
+                if ext == '.glb':
+                    bpy.ops.import_scene.gltf(
+                        filepath=current_model.path,
+                        import_pack_images=False,
+                        guess_original_bind_pose=False,
+                    )
+                elif ext == '.usdz':
+                    if hasattr(bpy.ops.wm, "usd_import"):
+                        bpy.ops.wm.usd_import(filepath=current_model.path)
+                    else:
+                        self.report({'ERROR'}, "当前Blender版本不支持USDZ导入")
+                        return {'CANCELLED'}
+                else:
+                    self.report({'ERROR'}, f"不支持的文件格式: {current_model.path}")
+                    return {'CANCELLED'}
+
             # 导入后更新视图，确保模型可见
-            bpy.ops.view3d.view_all(center=False)
-            
+            _safe_view_all()
+
             # 导入后清理可能的空骨骼
             armatures = [obj for obj in bpy.context.scene.objects if obj.type == 'ARMATURE']
             for armature in armatures:
@@ -771,7 +922,7 @@ class MESHY_OT_ImportModel(Operator):
                 if len(armature.children) == 0 or (armature.data and len(armature.data.bones) == 0):
                     bpy.data.objects.remove(armature, do_unlink=True)
                     self.report({'INFO'}, f"已清理空骨骼: {armature.name}")
-            
+
             self.report({'INFO'}, f"已导入模型: {current_model.name}")
             return {'FINISHED'}
         except Exception as e:

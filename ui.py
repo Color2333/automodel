@@ -15,6 +15,9 @@ def _draw_source_controls(layout, settings):
         row.label(text=settings.source_directory)
 
     row = box.row(align=True)
+    row.prop(settings, "source_mode", expand=True)
+
+    row = box.row(align=True)
     source_paths = settings.get_source_directories(existing_only=True)
     if len(source_paths) > 1:
         row.prop(settings, "source_directory_choice", text="")
@@ -37,7 +40,7 @@ class MESHY_PT_MainPanel(Panel):
         settings = context.scene.meshy_settings
         
         # 直接写死版本号，确保显示正确
-        version = "4.6.7"
+        version = "4.6.8"
         
         row = layout.row()
         row.label(text=f"版本: {version}", icon='PLUGIN')
@@ -92,6 +95,12 @@ class MESHY_PT_MainPanel(Panel):
         path_text = current_model.path
         row = box.row()
         row.label(text=path_text)
+        if getattr(current_model, "source_type", "SINGLE_FILE") == 'MULTI_PART_FOLDER':
+            row = box.row()
+            row.label(text=f"任务类型: 多体目录 / 部件数: {current_model.part_count}", icon='GROUP')
+            if current_model.preview_path:
+                row = box.row()
+                row.label(text=f"预览图: {os.path.basename(current_model.preview_path)}", icon='IMAGE_DATA')
         
         ui_status_labels = {
             'UNMARKED': "未标记",
