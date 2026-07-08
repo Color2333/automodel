@@ -40,7 +40,7 @@ class MESHY_PT_MainPanel(Panel):
         settings = context.scene.meshy_settings
         
         # 直接写死版本号，确保显示正确
-        version = "4.6.8"
+        version = "4.6.9"
         
         row = layout.row()
         row.label(text=f"版本: {version}", icon='PLUGIN')
