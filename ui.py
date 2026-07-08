@@ -202,6 +202,10 @@ class MESHY_PT_MainPanel(Panel):
         box.label(text="模型组织与导出", icon='EXPORT')
         row = box.row(align=True)
         row.prop(settings, "output_format", expand=True)
+        row = box.row()
+        row.prop(settings, "export_animations",
+                 text="导出动画",
+                 icon='ARMATURE_DATA')
         hint = box.row()
         hint.scale_y = 0.85
         hint.label(text="可修复：先「按组/导出所有」到 Completed，再点分类移动文件", icon='INFO')

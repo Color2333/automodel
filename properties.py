@@ -179,6 +179,13 @@ class MeshyAutoModelSettings(PropertyGroup):
         options={'SKIP_SAVE'}
     )
 
+    export_animations: BoolProperty(
+        name="导出动画",
+        description="导出时包含骨骼动作动画；关闭则只保留骨骼绑定数据（skin）",
+        default=False,
+        options={'SKIP_SAVE'}
+    )
+
     source_mode: EnumProperty(
         name="输入模式",
         description="控制源目录按单体 GLB/USDZ 文件还是多体子目录刷新任务",
@@ -347,6 +354,7 @@ class MeshyAutoModelSettings(PropertyGroup):
                 "fmt": self.output_format or "GLB",
                 "mark": self.mark_mode or "WHOLE_MODEL",
                 "src_mode": self.source_mode or "SINGLE_FILE",
+                "anim": bool(self.export_animations),
             }
             with open(state_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, separators=(',', ':'))
@@ -384,6 +392,7 @@ class MeshyAutoModelSettings(PropertyGroup):
             self.mark_mode = saved_mark_mode if saved_mark_mode in {'WHOLE_MODEL', 'SELECTED_OBJECTS'} else 'WHOLE_MODEL'
             saved_source_mode = data.get("src_mode", "SINGLE_FILE")
             self.source_mode = saved_source_mode if saved_source_mode in {'SINGLE_FILE', 'MULTI_PART_FOLDER'} else 'SINGLE_FILE'
+            self.export_animations = bool(data.get("anim", False))
             return bool(self.source_directory)
         except Exception as e:
             print(f"加载运行态失败: {e}")
@@ -477,7 +486,9 @@ class MeshyAutoModelSettings(PropertyGroup):
 
         if self.source_mode:
             progress_data["src_mode"] = self.source_mode
-        
+
+        progress_data["anim"] = bool(self.export_animations)
+
         # 保存到JSON文件 - 极简格式
         try:
             with open(progress_filepath, 'w', encoding='utf-8') as f:
@@ -524,6 +535,7 @@ class MeshyAutoModelSettings(PropertyGroup):
             self.mark_mode = saved_mark_mode if saved_mark_mode in {'WHOLE_MODEL', 'SELECTED_OBJECTS'} else 'WHOLE_MODEL'
             saved_source_mode = progress_data.get("src_mode", progress_data.get("source_mode", "SINGLE_FILE"))
             self.source_mode = saved_source_mode if saved_source_mode in {'SINGLE_FILE', 'MULTI_PART_FOLDER'} else 'SINGLE_FILE'
+            self.export_animations = bool(progress_data.get("anim", False))
             
             # 恢复模型列表和状态
             models_data = progress_data.get("models", [])

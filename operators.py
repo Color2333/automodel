@@ -1207,7 +1207,7 @@ class MESHY_OT_ExportModel(Operator):
                     use_selection=True,
                     export_extras=False,
                     export_skins=True,
-                    export_animations=False,
+                    export_animations=bool(settings.export_animations),
                     export_image_format='AUTO',
                 )
             elif file_extension == ".usdz":
@@ -1386,6 +1386,10 @@ class MESHY_OT_ExportModel(Operator):
             # 更新场景
             bpy.context.view_layer.update()
             
+            # 读取「导出动画」开关（默认关闭，只保留骨骼绑定数据）
+            _settings = getattr(bpy.context.scene, "meshy_settings", None)
+            _export_animations = bool(getattr(_settings, "export_animations", False))
+
             # 导出为GLB（不使用export_extras以减少额外数据）
             bpy.ops.export_scene.gltf(
                 filepath=filepath,
@@ -1393,7 +1397,7 @@ class MESHY_OT_ExportModel(Operator):
                 use_selection=True,
                 export_extras=False,
                 export_skins=True,
-                export_animations=False  # 避免导出动画数据
+                export_animations=_export_animations
             )
         
         finally:
