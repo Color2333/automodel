@@ -39,8 +39,8 @@ class MESHY_PT_MainPanel(Panel):
         layout = self.layout
         settings = context.scene.meshy_settings
         
-        # 直接写死版本号，确保显示正确
-        version = "4.6.9"
+        # 版本号从 bl_info 读取，避免每次发版手动同步
+        version = ".".join(str(v) for v in bl_info["version"])
         
         row = layout.row()
         row.label(text=f"版本: {version}", icon='PLUGIN')
