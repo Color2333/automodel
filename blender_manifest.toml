@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "meshy_automodel"
-version = "4.6.9"
+version = "4.6.10"
 name = "Meshy-AutoModel"
 tagline = "GLB/USDZ模型管理工具"
 maintainer = "xiangyu"

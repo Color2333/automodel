@@ -23,6 +23,21 @@ def runtime_state_filepath():
 
 MAX_SOURCE_DIRECTORY_HISTORY = 12
 
+_source_dir_cache = {
+    "paths_all": [],
+    "paths_existing": [],
+    "enum_items": [],
+    # 用 None 作哨兵：命中键 current_json/current_src 恒为字符串，None 永不相等，
+    # 从而避免「全空状态（源目录与历史都为 ''）」误命中过期缓存。
+    "source_directories_json": None,
+    "current_source": None,
+}
+
+
+def _invalidate_source_dir_cache():
+    _source_dir_cache["source_directories_json"] = None
+    _source_dir_cache["current_source"] = None
+
 
 def _coerce_source_directory_list(raw_paths, existing_only=False):
     paths = []
@@ -47,16 +62,31 @@ def _coerce_source_directory_list(raw_paths, existing_only=False):
 
 
 def _source_directory_enum_items(self, context):
+    cached_json = _source_dir_cache.get("source_directories_json")
+    cached_current = _source_dir_cache.get("current_source")
+    current_json = self.source_directories_json or ""
+    current_src = _normalized_dir(self.source_directory)
+
+    if cached_json == current_json and cached_current == current_src and _source_dir_cache.get("enum_items"):
+        return _source_dir_cache["enum_items"]
+
     paths = self.get_source_directories(existing_only=True)
     if not paths:
-        return [('NONE', "无可切换输入源", "请先设置源目录")]
+        items = [('NONE', "无可切换输入源", "请先设置源目录")]
+    else:
+        items = []
+        normalized_current = _normalized_dir(self.source_directory)
+        for idx, path in enumerate(paths):
+            basename = os.path.basename(os.path.normpath(path)) or path
+            label = f"当前: {basename}" if path == normalized_current else basename
+            items.append((f"SRC_{idx}", label, path, 'FILE_FOLDER', idx))
 
-    items = []
-    for idx, path in enumerate(paths):
-        basename = os.path.basename(os.path.normpath(path)) or path
-        label = f"当前: {basename}" if path == _normalized_dir(self.source_directory) else basename
-        items.append((f"SRC_{idx}", label, path, 'FILE_FOLDER', idx))
+    _source_dir_cache["enum_items"] = items
     return items
+
+
+def _on_source_directory_update(self, context):
+    _invalidate_source_dir_cache()
 
 
 _MESHY_MODEL_STATUS_IDS = frozenset({
@@ -143,7 +173,8 @@ class MeshyAutoModelSettings(PropertyGroup):
         description="包含GLB/USDZ模型的源目录",
         default="",
         subtype='DIR_PATH',
-        options={'SKIP_SAVE'}  # 不保存此属性
+        options={'SKIP_SAVE'},  # 不保存此属性
+        update=_on_source_directory_update,
     )
 
     source_directories_json: StringProperty(
@@ -296,16 +327,46 @@ class MeshyAutoModelSettings(PropertyGroup):
         return os.path.join(progress_dir, progress_filename)
 
     def get_source_directories(self, include_current=True, existing_only=False):
+        cache_key = "paths_existing" if existing_only else "paths_all"
+        cached_json = _source_dir_cache.get("source_directories_json")
+        cached_current = _source_dir_cache.get("current_source")
+        current_json = self.source_directories_json or ""
+        current_src = _normalized_dir(self.source_directory)
+
+        if not include_current:
+            raw_paths = []
+            try:
+                stored_paths = json.loads(current_json or "[]")
+                if isinstance(stored_paths, list):
+                    raw_paths.extend(stored_paths)
+            except Exception:
+                pass
+            return _coerce_source_directory_list(raw_paths, existing_only=existing_only)
+
+        if cached_json == current_json and cached_current == current_src:
+            cached = _source_dir_cache.get(cache_key)
+            if cached is not None:
+                return list(cached)
+
         raw_paths = []
-        if include_current and self.source_directory:
+        if self.source_directory:
             raw_paths.append(self.source_directory)
         try:
-            stored_paths = json.loads(self.source_directories_json or "[]")
+            stored_paths = json.loads(current_json or "[]")
             if isinstance(stored_paths, list):
                 raw_paths.extend(stored_paths)
         except Exception:
             pass
-        return _coerce_source_directory_list(raw_paths, existing_only=existing_only)
+
+        paths_all = _coerce_source_directory_list(raw_paths, existing_only=False)
+        paths_existing = _coerce_source_directory_list(raw_paths, existing_only=True)
+
+        _source_dir_cache["paths_all"] = paths_all
+        _source_dir_cache["paths_existing"] = paths_existing
+        _source_dir_cache["source_directories_json"] = current_json
+        _source_dir_cache["current_source"] = current_src
+
+        return list(paths_existing if existing_only else paths_all)
 
     def set_source_directories(self, paths):
         source_paths = _coerce_source_directory_list(paths)
@@ -315,6 +376,7 @@ class MeshyAutoModelSettings(PropertyGroup):
             separators=(',', ':'),
         )
         self.source_directory_choice = "SRC_0" if source_paths else "NONE"
+        _invalidate_source_dir_cache()
 
     def remember_source_directory(self, path=None):
         path = path or self.source_directory
@@ -393,6 +455,7 @@ class MeshyAutoModelSettings(PropertyGroup):
             saved_source_mode = data.get("src_mode", "SINGLE_FILE")
             self.source_mode = saved_source_mode if saved_source_mode in {'SINGLE_FILE', 'MULTI_PART_FOLDER'} else 'SINGLE_FILE'
             self.export_animations = bool(data.get("anim", False))
+            _invalidate_source_dir_cache()
             return bool(self.source_directory)
         except Exception as e:
             print(f"加载运行态失败: {e}")

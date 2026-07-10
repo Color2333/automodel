@@ -14,7 +14,7 @@
 bl_info = {
     "name": "Meshy-AutoModel",
     "author": "Meshy Tech",
-    "version": (4, 6, 9),
+    "version": (4, 6, 10),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > Meshy-AutoModel",
     "description": "GLB/USDZ模型管理、修复和状态追踪工具",
@@ -177,11 +177,20 @@ def register():
             operators.save_active_scene_checkpoint_for_handlers()
         except Exception as e:
             print(f"Meshy-AutoModel: Ctrl+S同步拆分现场失败: {e}")
-    
+
+    @persistent
+    def meshy_depsgraph_dirty_handler(scene, depsgraph=None):
+        # 场景发生真实几何/变换更新时清除 clean 标记，供 checkpoint 判断是否需要重写整场景
+        try:
+            operators.meshy_mark_scene_dirty(depsgraph)
+        except Exception:
+            pass
+
     # 注册加载进度处理器
     bpy.app.handlers.load_post.append(load_progress_handler)
     bpy.app.handlers.save_pre.append(meshy_save_checkpoint_handler)
-    
+    bpy.app.handlers.depsgraph_update_post.append(meshy_depsgraph_dirty_handler)
+
     print("Meshy AutoModel 插件已注册")
 
 def unregister():
@@ -193,7 +202,11 @@ def unregister():
     for handler in bpy.app.handlers.save_pre:
         if handler.__name__ == 'meshy_save_checkpoint_handler':
             bpy.app.handlers.save_pre.remove(handler)
-    
+
+    for handler in list(bpy.app.handlers.depsgraph_update_post):
+        if handler.__name__ == 'meshy_depsgraph_dirty_handler':
+            bpy.app.handlers.depsgraph_update_post.remove(handler)
+
     # 注销快捷键
     for keymap in addon_keymaps:
         bpy.context.window_manager.keyconfigs.addon.keymaps.remove(keymap)

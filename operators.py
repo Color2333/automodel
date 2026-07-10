@@ -72,6 +72,12 @@ SCENE_CHECKPOINT_DIRNAME = "scene_checkpoints"
 _MESHY_CHECKPOINT_SAVING = False
 _MESHY_LAST_CHECKPOINT_SAVE = {}
 CHECKPOINT_MIN_INTERVAL_SECONDS = 10.0
+# C 档脏标记：记录当前场景「精确匹配」的 checkpoint 路径；None 表示未知/已脏 → 照常写盘。
+# 语义上偏保守：跟踪若有漏洞只会导致「多写」（慢一点），绝不会「漏写」丢失拆分现场。
+_MESHY_CLEAN_CHECKPOINT = None
+# 抑制脏标记：插件自身的临时场景变换（导出移位/断点加载）期间 >0，避免误判为用户改动。
+# 用计数器而非布尔，保证嵌套的 begin/end 也能正确配平。
+_MESHY_SUSPEND_DIRTY = 0
 
 
 def current_output_extension(settings):
@@ -87,6 +93,49 @@ def _safe_view_all():
         bpy.ops.view3d.view_all(center=False)
     except Exception:
         pass
+
+
+def _meshy_deselect_all(context):
+    """用数据 API 取消选择，避免 bpy.ops.object.select_all 的算子开销与 undo 压栈。"""
+    for obj in list(getattr(context, "selected_objects", []) or []):
+        try:
+            obj.select_set(False)
+        except (ReferenceError, RuntimeError):
+            continue
+
+
+def _meshy_set_suspend_dirty(value):
+    """成对调用：True 进入抑制区（计数+1），False 退出（计数-1）。计数 >0 时抑制脏标记。"""
+    global _MESHY_SUSPEND_DIRTY
+    if value:
+        _MESHY_SUSPEND_DIRTY += 1
+    else:
+        _MESHY_SUSPEND_DIRTY = max(0, _MESHY_SUSPEND_DIRTY - 1)
+
+
+def _meshy_mark_clean(checkpoint_path):
+    global _MESHY_CLEAN_CHECKPOINT
+    _MESHY_CLEAN_CHECKPOINT = checkpoint_path
+
+
+def meshy_mark_scene_dirty(depsgraph=None):
+    """由 depsgraph_update_post 调用：仅在发生真实几何/变换更新时置脏，忽略纯选择/视图变化。"""
+    global _MESHY_CLEAN_CHECKPOINT
+    if _MESHY_SUSPEND_DIRTY:
+        return
+    if depsgraph is None:
+        _MESHY_CLEAN_CHECKPOINT = None
+        return
+    try:
+        for upd in depsgraph.updates:
+            # 几何/变换/着色（材质）任一变化都视为用户改动，避免漏写丢失修复成果。
+            if (getattr(upd, "is_updated_geometry", False)
+                    or getattr(upd, "is_updated_transform", False)
+                    or getattr(upd, "is_updated_shading", False)):
+                _MESHY_CLEAN_CHECKPOINT = None
+                return
+    except Exception:
+        _MESHY_CLEAN_CHECKPOINT = None
 
 
 def _safe_object_name(name, fallback="Part"):
@@ -216,6 +265,8 @@ def activate_source_directory(context, directory, report_fn=None):
         except NameError:
             pass
 
+    _meshy_clear_scene_before_import(context)
+
     context.scene.meshy_models.clear()
     settings.source_directory = directory
     settings.output_directory = os.path.dirname(directory)
@@ -247,8 +298,6 @@ def activate_source_directory(context, directory, report_fn=None):
     if not loaded_progress:
         bpy.ops.meshy.refresh_model_list()
 
-    settings.remember_source_directory(directory)
-    settings.save_runtime_state()
     if report_fn:
         report_fn({'INFO'}, f"输入源已切换为: {directory}")
     return {'FINISHED'}
@@ -532,7 +581,7 @@ def _meshy_scene_checkpoint_path(settings, model):
     return os.path.join(checkpoint_dir, f"{safe_name}_{digest}.blend")
 
 
-def _meshy_save_scene_checkpoint(context, report_fn=None, force=False):
+def _meshy_save_scene_checkpoint(context, report_fn=None, force=False, throttle=False):
     global _MESHY_CHECKPOINT_SAVING
     settings = getattr(context.scene, "meshy_settings", None)
     if not settings or (not settings.auto_save_progress and not force):
@@ -548,13 +597,18 @@ def _meshy_save_scene_checkpoint(context, report_fn=None, force=False):
         return False
 
     if not force:
-        try:
-            now = datetime.datetime.now().timestamp()
-            last_saved = _MESHY_LAST_CHECKPOINT_SAVE.get(checkpoint_path, 0)
-            if now - last_saved < CHECKPOINT_MIN_INTERVAL_SECONDS:
-                return False
-        except Exception:
-            pass
+        # C 档：场景自上次断点写入/加载以来无用户几何改动，且 .blend 已存在 → 跳过整场景写盘。
+        if _MESHY_CLEAN_CHECKPOINT == checkpoint_path and os.path.exists(checkpoint_path):
+            return False
+        # B 档：高频触发路径（如 Ctrl+S）按时间节流；导出等明确动作不传 throttle，脏了必写。
+        if throttle:
+            try:
+                now = datetime.datetime.now().timestamp()
+                last_saved = _MESHY_LAST_CHECKPOINT_SAVE.get(checkpoint_path, 0)
+                if now - last_saved < CHECKPOINT_MIN_INTERVAL_SECONDS:
+                    return False
+            except Exception:
+                pass
 
     try:
         _MESHY_CHECKPOINT_SAVING = True
@@ -562,6 +616,7 @@ def _meshy_save_scene_checkpoint(context, report_fn=None, force=False):
         datablocks = set(context.scene.objects)
         bpy.data.libraries.write(checkpoint_path, datablocks, fake_user=True)
         _MESHY_LAST_CHECKPOINT_SAVE[checkpoint_path] = datetime.datetime.now().timestamp()
+        _meshy_mark_clean(checkpoint_path)
         return True
     except TypeError:
         try:
@@ -571,6 +626,7 @@ def _meshy_save_scene_checkpoint(context, report_fn=None, force=False):
                 copy=True,
             )
             _MESHY_LAST_CHECKPOINT_SAVE[checkpoint_path] = datetime.datetime.now().timestamp()
+            _meshy_mark_clean(checkpoint_path)
             return True
         except Exception as e:
             if report_fn:
@@ -589,7 +645,7 @@ def _meshy_autosave_scene_edit(context, report_fn=None):
     if not settings or not settings.auto_save_progress:
         return False
     settings.save_progress(context)
-    return _meshy_save_scene_checkpoint(context, report_fn)
+    return _meshy_save_scene_checkpoint(context, report_fn, throttle=True)
 
 
 def save_active_scene_checkpoint_for_handlers():
@@ -598,7 +654,7 @@ def save_active_scene_checkpoint_for_handlers():
     if not settings or not settings.auto_save_progress:
         return False
     settings.save_progress(context)
-    return _meshy_save_scene_checkpoint(context, force=True)
+    return _meshy_save_scene_checkpoint(context, throttle=True)
 
 
 def _meshy_load_scene_checkpoint(context, model, report_fn=None):
@@ -608,6 +664,7 @@ def _meshy_load_scene_checkpoint(context, model, report_fn=None):
         return False
 
     try:
+        _meshy_set_suspend_dirty(True)
         _meshy_clear_scene_before_import(context)
         with bpy.data.libraries.load(checkpoint_path, link=False) as (data_from, data_to):
             data_to.objects = list(data_from.objects)
@@ -619,6 +676,8 @@ def _meshy_load_scene_checkpoint(context, model, report_fn=None):
 
         bpy.context.view_layer.update()
         bpy.ops.view3d.view_all(center=False)
+        # 加载后场景精确等于该 .blend；标记为 clean，避免随后无改动的导出/保存重复写盘。
+        _meshy_mark_clean(checkpoint_path)
         if report_fn:
             report_fn({'INFO'}, f"已恢复拆分现场: {model.name}")
         return True
@@ -626,6 +685,8 @@ def _meshy_load_scene_checkpoint(context, model, report_fn=None):
         if report_fn:
             report_fn({'WARNING'}, f"恢复拆分现场失败，将重新导入源模型: {e}")
         return False
+    finally:
+        _meshy_set_suspend_dirty(False)
 
 
 def _meshy_delete_scene_checkpoint(context, model=None):
@@ -832,6 +893,11 @@ def _meshy_purge_orphans_safe():
             pass
 
 
+def _meshy_purge_all_orphans():
+    for _ in range(3):
+        _meshy_purge_orphans_safe()
+
+
 def _meshy_cleanup_usd_temp_dirs():
     try:
         tmp_root = tempfile.gettempdir()
@@ -857,7 +923,7 @@ def _meshy_clear_scene_before_import(context):
                 bpy.data.collections.remove(child)
 
     remove_empty_child_collections(scene.collection)
-    _meshy_purge_orphans_safe()
+    _meshy_purge_all_orphans()
     _meshy_cleanup_usd_temp_dirs()
 
 
@@ -1063,7 +1129,7 @@ class MESHY_OT_ExportModel(Operator):
                 if successful_exports > 0:
                     if settings.auto_save_progress:
                         settings.save_progress(context)
-                        _meshy_save_scene_checkpoint(context, self.report, force=True)
+                        _meshy_save_scene_checkpoint(context, self.report)
                     self.report({'INFO'}, f"已成功导出 {successful_exports} 个组")
                     
                     return {'FINISHED'}
@@ -1115,7 +1181,7 @@ class MESHY_OT_ExportModel(Operator):
             
         finally:
             # 恢复原始选择状态
-            bpy.ops.object.select_all(action='DESELECT')
+            _meshy_deselect_all(context)
             for obj in original_selection:
                 try:
                     # 只有当对象有效且在当前场景中时才选中它
@@ -1155,6 +1221,9 @@ class MESHY_OT_ExportModel(Operator):
         original_locations = {}
         
         try:
+            # 导出会把对象临时移到原点再复位，属插件自身变换；抑制脏标记避免误判为用户改动。
+            _meshy_set_suspend_dirty(True)
+
             # 确定文件名和扩展名；命名规则沿用 GLB 版本，只替换扩展名。
             file_extension = current_output_extension(settings)
                 
@@ -1194,8 +1263,8 @@ class MESHY_OT_ExportModel(Operator):
             bpy.context.view_layer.update()
             
             # 取消选择所有对象
-            bpy.ops.object.select_all(action='DESELECT')
-            
+            _meshy_deselect_all(context)
+
             # 选择要导出的对象
             for obj in objects:
                 obj.select_set(True)
@@ -1258,10 +1327,10 @@ class MESHY_OT_ExportModel(Operator):
             # 更新模型的last_exported_status
             model.last_exported_status = model.status
             
-            # 保存进度
+            # 保存进度；checkpoint 改为非强制：脏了才写整场景，未改动（clean）则跳过。
             if settings.auto_save_progress and save_after:
                 settings.save_progress(context)
-                _meshy_save_scene_checkpoint(context, self.report, force=True)
+                _meshy_save_scene_checkpoint(context, self.report)
             
             # 输出日志
             if group_name:
@@ -1293,7 +1362,8 @@ class MESHY_OT_ExportModel(Operator):
 
             bpy.context.view_layer.update()
             context.scene.cursor.location = original_cursor_location
-    
+            _meshy_set_suspend_dirty(False)
+
     def invoke(self, context, event):
         # 直接执行，不再弹出选择对话框
         return self.execute(context)
@@ -1361,8 +1431,8 @@ class MESHY_OT_ExportModel(Operator):
         objects = expand_export_objects_with_armatures(list(objects))
 
         # 取消选择所有对象
-        bpy.ops.object.select_all(action='DESELECT')
-        
+        _meshy_deselect_all(bpy.context)
+
         # 选择要导出的对象
         for obj in objects:
             obj.select_set(True)
@@ -1373,6 +1443,9 @@ class MESHY_OT_ExportModel(Operator):
             original_locations[obj.name] = obj.location.copy()
         
         try:
+            # 导出临时移位属插件自身变换，抑制脏标记
+            _meshy_set_suspend_dirty(True)
+
             # 计算中心点
             from mathutils import Vector
             center = Vector((0, 0, 0))
@@ -1408,10 +1481,12 @@ class MESHY_OT_ExportModel(Operator):
             
             # 更新场景
             bpy.context.view_layer.update()
-            
+
             # 取消选择
             for obj in objects:
                 obj.select_set(False)
+
+            _meshy_set_suspend_dirty(False)
 
     def get_all_children(self, obj, result_list):
         """递归获取所有子对象"""

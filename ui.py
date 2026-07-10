@@ -18,12 +18,11 @@ def _draw_source_controls(layout, settings):
     row.prop(settings, "source_mode", expand=True)
 
     row = box.row(align=True)
-    source_paths = settings.get_source_directories(existing_only=True)
-    if len(source_paths) > 1:
+    if settings.source_directory_choice and settings.source_directory_choice != 'NONE':
         row.prop(settings, "source_directory_choice", text="")
         row.operator("meshy.switch_source_directory", text="", icon='FILE_REFRESH')
-    elif source_paths:
-        row.label(text=os.path.basename(os.path.normpath(source_paths[0])) or source_paths[0])
+    elif settings.source_directory:
+        row.label(text=os.path.basename(os.path.normpath(settings.source_directory)) or settings.source_directory)
     row.operator("meshy.set_source_directory", text="", icon='FILEBROWSER')
 
 
@@ -70,7 +69,8 @@ class MESHY_PT_MainPanel(Panel):
         
         # 顶部区域 - 模型信息
         models = context.scene.meshy_models
-        if not models or len(models) == 0:
+        model_count = len(models)
+        if not models or model_count == 0:
             box = layout.box()
             box.label(text="未找到模型，请设置或刷新源目录")
             row = box.row()
@@ -79,13 +79,13 @@ class MESHY_PT_MainPanel(Panel):
             row.operator("meshy.refresh_model_list", text="刷新", icon='FILE_REFRESH')
             return
         
-        # 确保当前索引有效
-        model_count = len(models)
-        if settings.current_model_index >= model_count:
-            settings.current_model_index = model_count - 1
-        
-        # 获取当前模型
-        current_model = models[settings.current_model_index]
+        # 获取当前模型，确保索引有效
+        current_idx = settings.current_model_index
+        if current_idx >= model_count:
+            current_idx = model_count - 1
+        if current_idx < 0:
+            current_idx = 0
+        current_model = models[current_idx]
         
         # 模型信息区域 - 显示完整路径而不是名称
         box = layout.box()
@@ -243,7 +243,7 @@ class MESHY_PT_MainPanel(Panel):
         info_row = nav_box.row()
         info_row.alignment = 'CENTER'  # 居中显示
         info_row.scale_y = 1.2  # 稍微增大
-        info_row.label(text=f"当前位置: {settings.current_model_index + 1}/{model_count}", icon='VIEWZOOM')
+        info_row.label(text=f"当前位置: {current_idx + 1}/{model_count}", icon='VIEWZOOM')
         
         # 导航按钮行：未标记禁下一项；可修复时禁上一项但允许下一项
         btn_row = nav_box.row(align=True)
