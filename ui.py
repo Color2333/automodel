@@ -412,7 +412,11 @@ class MESHY_PT_ProgressPanel(Panel):
         row = layout.row(align=True)
         row.operator("meshy.save_progress", text="保存进度", icon='FILE_TICK')
         row.operator("meshy.load_progress", text="加载进度", icon='LOOP_BACK')
-        
+
+        # 清除当前源目录的进度（progress.json + scene_checkpoints）
+        row = layout.row()
+        row.operator("meshy.clear_progress", text="清除进度", icon='TRASH')
+
         # 显示最后保存时间
         if settings.last_save_time:
             row = layout.row()

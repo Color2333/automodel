@@ -44,6 +44,35 @@ def status_subdir_for_export(status, operator_suffix):
     return mapping.get(status)
 
 
+def _delete_exported_outputs(settings):
+    """删除输出目录下与当前操作者相关的分类成果文件夹，返回实际删除的目录数。
+
+    覆盖 status_subdir_for_export 的全部终态目录 + Completed，另兼容旧版命名
+    （NoAction_/good_/Unfixable_/bad_）。只删 *_{操作者} 目录，不动源目录与其它内容。
+    """
+    base = output_base_directory(settings)
+    if not base or not os.path.isdir(base):
+        return 0
+    op_suffix = _meshy_operator_folder_suffix(settings)
+    dirnames = []
+    for status in ('COMPLETED',) + TERMINAL_EXPORT_STATUSES:
+        name = status_subdir_for_export(status, op_suffix)
+        if name:
+            dirnames.append(name)
+    dirnames.extend([
+        f"NoAction_{op_suffix}", f"good_{op_suffix}",
+        f"Unfixable_{op_suffix}", f"bad_{op_suffix}",
+    ])
+    removed = 0
+    for name in dirnames:
+        target = os.path.join(base, name)
+        if os.path.isdir(target):
+            shutil.rmtree(target, ignore_errors=True)
+            if not os.path.isdir(target):
+                removed += 1
+    return removed
+
+
 def output_base_directory(settings):
     if not settings.output_directory:
         if settings.source_directory:
@@ -1890,24 +1919,55 @@ class MESHY_OT_ClearProgress(Operator):
     bl_idname = "meshy.clear_progress"
     bl_label = "清除进度"
     bl_description = "清除保存的处理进度"
-    
+
+    also_delete_outputs: BoolProperty(
+        name="同时删除已导出成果",
+        description="连同输出目录下 Completed/Good/Bad/Questionable/Hard/Parts/NorError/ComboAsset_{操作者} 分类文件夹一并删除（不可恢复）",
+        default=False,
+    )
+
+    def invoke(self, context, event):
+        # 每次弹窗都重置为不勾选，避免沿用上次的危险选项
+        self.also_delete_outputs = False
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="清除当前源目录的处理进度（progress.json + 断点现场）", icon='TRASH')
+        layout.prop(self, "also_delete_outputs")
+        if self.also_delete_outputs:
+            box = layout.box()
+            box.alert = True
+            box.label(text="警告：将永久删除输出目录下 *_{操作者} 分类文件夹！", icon='ERROR')
+            box.label(text="此操作不可恢复，请确认。")
+
     def execute(self, context):
         settings = context.scene.meshy_settings
-        
+
         if not settings.source_directory:
             self.report({'ERROR'}, "请先设置源目录")
             return {'CANCELLED'}
-        
-        if settings.clear_progress(context):
+
+        cleared = settings.clear_progress(context)
+        if cleared:
             progress_filepath = settings.get_progress_filepath()
             if progress_filepath:
                 checkpoint_dir = os.path.join(os.path.dirname(progress_filepath), SCENE_CHECKPOINT_DIRNAME)
                 shutil.rmtree(checkpoint_dir, ignore_errors=True)
-            self.report({'INFO'}, "进度已清除")
-            return {'FINISHED'}
-        else:
-            self.report({'ERROR'}, "没有找到保存的进度")
+
+        removed_output_dirs = 0
+        if self.also_delete_outputs:
+            removed_output_dirs = _delete_exported_outputs(settings)
+
+        if not cleared and removed_output_dirs == 0:
+            self.report({'ERROR'}, "没有找到保存的进度或已导出成果")
             return {'CANCELLED'}
+
+        msg = "进度已清除" if cleared else "未找到进度文件"
+        if self.also_delete_outputs:
+            msg += f"，已删除 {removed_output_dirs} 个成果目录"
+        self.report({'INFO'}, msg)
+        return {'FINISHED'}
 
 # 去除Alpha连接操作符
 class MESHY_OT_RemoveAlpha(Operator):
